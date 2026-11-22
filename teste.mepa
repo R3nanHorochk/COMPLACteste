@@ -2,10 +2,10 @@
         AMEM   1
         DSVS   L0
 L1:     ENPR   1
-        CRVL   1,-4
-        CRVL   1,-3
+        CRVL   1,-6
+        CRVL   1,-5
         SOMA  
-        ARMZ   1,-5
+        ARMZ   1,-7
         RTPR   1,2
 L0:     ENPR   1
         AMEM   2
