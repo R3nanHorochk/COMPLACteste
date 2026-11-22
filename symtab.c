@@ -1,161 +1,177 @@
 #include "symtab.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-#define M 250 // Tamanho fixo da tabela
-#define HIST_MAX 1024
+#define MAX_SYMBOLS 1024
+#define MAX_SCOPES  64
 
-static Simbolo tabela[M];
-static Simbolo historico[HIST_MAX];
-static int historico_count = 0;
-static char escopo_atual[64] = "global";
-static int nivel_atual = 0;
+static Simbolo tabela[MAX_SYMBOLS];
+static int total_simbolos = 0;
 
-static int hash_func(const char *id) {
-    int k = 0;
-    while (*id) {
-        k += (char)(*id);
-        id++;
-    }
-    return k % M;
-}
+static char pilha_escopos[MAX_SCOPES][64];
+static int topo_escopo = -1;
 
 void symtab_init(void) {
-    for (int i = 0; i < M; i++) {
+    total_simbolos = 0;
+    topo_escopo = -1;
+    for (int i = 0; i < MAX_SYMBOLS; i++) {
         tabela[i].ocupado = false;
     }
-    strcpy(escopo_atual, "global");
-    nivel_atual = 0;
-    historico_count = 0;
+    symtab_enter_scope("global");
+}
+
+void symtab_destroy(void) {
+    total_simbolos = 0;
+    topo_escopo = -1;
 }
 
 void symtab_enter_scope(const char *name) {
-    nivel_atual++;
-    strncpy(escopo_atual, name, sizeof(escopo_atual) - 1);
-    escopo_atual[sizeof(escopo_atual) - 1] = '\0';
+    if (topo_escopo < MAX_SCOPES - 1) {
+        topo_escopo++;
+        strncpy(pilha_escopos[topo_escopo], name, 63);
+        pilha_escopos[topo_escopo][63] = '\0';
+    }
 }
 
 void symtab_leave_scope(void) {
-    if (nivel_atual <= 0) return;
-
-    for (int i = 0; i < M; i++) {
-        if (tabela[i].ocupado && tabela[i].level == nivel_atual) {
-            tabela[i].ocupado = false;
-        }
-    }
-
-    nivel_atual--;
-    if (nivel_atual == 0) {
-        strcpy(escopo_atual, "global");
+    if (topo_escopo > 0) {
+        topo_escopo--;
     }
 }
 
-bool symtab_insert(const char *id, SimboloCat cat, SimboloTipo tipo, int extra) {
-    int start_idx = hash_func(id);
-    int idx = start_idx;
-    int pos_livre = -1;
+int symtab_get_current_level(void) {
+    return (topo_escopo <= 0) ? 0 : 1;
+}
 
-    for (int i = 0; i < M; i++) {
-        if (tabela[idx].ocupado) {
-            if (tabela[idx].level == nivel_atual && strcmp(tabela[idx].id, id) == 0) {
-                return false;
-            }
-        } else {
-            if (pos_livre == -1) {
-                pos_livre = idx;
-                break; 
+const char *symtab_get_current_scope_name(void) {
+    return (topo_escopo >= 0) ? pilha_escopos[topo_escopo] : "global";
+}
+
+Simbolo *symtab_lookup_current_scope(const char *id) {
+    if (!id || topo_escopo < 0) return NULL;
+    const char *escopo_atual = pilha_escopos[topo_escopo];
+
+    for (int i = 0; i < total_simbolos; i++) {
+        if (tabela[i].ocupado &&
+            strcmp(tabela[i].scope, escopo_atual) == 0 &&
+            strcmp(tabela[i].id, id) == 0) {
+            return &tabela[i];
+        }
+    }
+    return NULL;
+}
+
+Simbolo *symtab_lookup(const char *id) {
+    if (!id || topo_escopo < 0) {
+        return NULL;
+    }
+
+    for (int sc = topo_escopo; sc >= 0; sc--) {
+        for (int i = total_simbolos - 1; i >= 0; i--) {
+            if (tabela[i].ocupado &&
+                strcmp(tabela[i].scope, pilha_escopos[sc]) == 0 &&
+                strcmp(tabela[i].id, id) == 0) {
+                return &tabela[i];
             }
         }
-        idx = (idx + 1) % M; 
+    }
+    return NULL;
+}
+
+bool symtab_insert(const char *id, SimboloCat cat, SimboloTipo tipo, int offset, int extra) {
+    if (symtab_lookup_current_scope(id) != NULL) {
+        return false;
     }
 
-    if (pos_livre == -1) {
-        return false; 
+    if (total_simbolos >= MAX_SYMBOLS) return false;
+
+    Simbolo *s = &tabela[total_simbolos++];
+    s->ocupado = true;
+    strncpy(s->id, id, 31);
+    s->id[31] = '\0';
+    s->cat = cat;
+    s->tipo = tipo;
+    s->extra = extra;
+    strncpy(s->scope, symtab_get_current_scope_name(), 63);
+    s->scope[63] = '\0';
+
+    if (cat == CAT_VAR_GLOBAL) {
+        s->level = 0;
+    } else {
+        s->level = symtab_get_current_level();
     }
 
-    tabela[pos_livre].ocupado = true;
-    strncpy(tabela[pos_livre].id, id, sizeof(tabela[pos_livre].id) - 1);
-    tabela[pos_livre].id[sizeof(tabela[pos_livre].id) - 1] = '\0';
-    tabela[pos_livre].cat = cat;
-    tabela[pos_livre].tipo = tipo;
-    tabela[pos_livre].extra = extra;
-    tabela[pos_livre].level = nivel_atual;
-    strcpy(tabela[pos_livre].scope, escopo_atual);
-
-    if (historico_count < HIST_MAX) {
-        historico[historico_count++] = tabela[pos_livre];
-    }
+    s->offset = offset;
+    s->tam_vetor = (extra > 0) ? extra : 0;
+    s->rotulo[0] = '\0';
+    s->qtd_params = 0;
 
     return true;
 }
 
-
-Simbolo *symtab_lookup(const char *id) {
-    int start_idx = hash_func(id);
-    int idx = start_idx;
-    Simbolo *melhor_candidato = NULL;
-
-    for (int i = 0; i < M; i++) {
-        if (tabela[idx].ocupado && strcmp(tabela[idx].id, id) == 0) {
-            if (melhor_candidato == NULL || tabela[idx].level > melhor_candidato->level) {
-                melhor_candidato = &tabela[idx];
-            }
-        }
-        idx = (idx + 1) % M; 
-    }
-
-    return melhor_candidato;
-}
-
-void symtab_print(void) {
-    const char *cat_nomes[] = {"var_global", "var_local", "param", "proc", "func"};
-    const char *tipo_nomes[] = {"int", "bool", "chr", "void"};
-
-    printf("\n--- TABELA DE SIMBOLOS (Tamanho: %d) ---\n", M);
-    for (int i = 0; i < M; i++) {
-        if (tabela[i].ocupado) {
-            printf("[%03d] Escopo: %-10s | Nivel: %d | ID: %-8s | Cat: %-10s | Tipo: %-5s | Extra: %d\n",
-                   i, tabela[i].scope, tabela[i].level, tabela[i].id,
-                   cat_nomes[tabela[i].cat], tipo_nomes[tabela[i].tipo], tabela[i].extra);
+void symtab_update_pending_types(SimboloTipo tipo, int tam_vetor) {
+    const char *escopo_atual = symtab_get_current_scope_name();
+    for (int i = 0; i < total_simbolos; i++) {
+        if (tabela[i].ocupado &&
+            strcmp(tabela[i].scope, escopo_atual) == 0 &&
+            tabela[i].tipo == TIPO_INDEF) {
+            tabela[i].tipo = tipo;
+            tabela[i].tam_vetor = tam_vetor;
         }
     }
-    printf("----------------------------------------\n");
-}
-
-void symtab_destroy(void) {
-    for (int i = 0; i < M; i++) {
-        tabela[i].ocupado = false;
-    }
-}
-
-int symtab_get_count(void) { return historico_count; }
-
-const SymEntry *symtab_get_entry(int index) {
-    if (index < 0 || index >= historico_count) return NULL;
-    return &historico[index];
-}
-
-const char *symtab_cat_to_str(SimboloCat cat) {
-    static const char *names[] = {"var_global", "var_local", "param", "proc", "func"};
-    return (cat >= CAT_VAR_GLOBAL && cat <= CAT_FUNCAO) ? names[cat] : "desconhecido";
-}
-
-const char *symtab_type_to_str(SimboloTipo type) {
-    static const char *names[] = {"int", "logic", "chr", "void"};
-    return (type >= TIPO_INT && type <= TIPO_VOID) ? names[type] : "desconhecido";
 }
 
 void symtab_update_signature(const char *id, SimboloTipo type, int extra) {
-    for (int i = 0; i < M; i++) {
-        if (tabela[i].ocupado && tabela[i].level == 1 && strcmp(tabela[i].id, id) == 0) {
-            tabela[i].tipo = type;
-            tabela[i].extra = extra;
-        }
+    Simbolo *s = symtab_lookup(id);
+    if (s) {
+        s->tipo = type;
+        s->extra = extra;
     }
-    for (int i = 0; i < historico_count; i++) {
-        if (historico[i].level == 1 && strcmp(historico[i].id, id) == 0) {
-            historico[i].tipo = type;
-            historico[i].extra = extra;
-        }
+}
+
+int symtab_get_count(void) {
+    return total_simbolos;
+}
+
+const SymEntry *symtab_get_entry(int index) {
+    if (index >= 0 && index < total_simbolos) {
+        return &tabela[index];
     }
+    return NULL;
+}
+
+const char *symtab_cat_to_str(SimboloCat cat) {
+    switch (cat) {
+        case CAT_VAR_GLOBAL:   return "VAR_GLOBAL";
+        case CAT_VAR_LOCAL:    return "VAR_LOCAL";
+        case CAT_PARAM:        return "PARAM";
+        case CAT_PROCEDIMENTO: return "PROCEDIMENTO";
+        case CAT_FUNCAO:       return "FUNCAO";
+        default:               return "INDEF";
+    }
+}
+
+const char *symtab_type_to_str(SimboloTipo type) {
+    switch (type) {
+        case TIPO_INT:   return "int";
+        case TIPO_BOOL:  return "logic";
+        case TIPO_CHR:   return "chr";
+        case TIPO_VOID:  return "void";
+        default:         return "indef";
+    }
+}
+
+void symtab_print(void) {
+    printf("\n=== TABELA DE SIMBOLOS (COMPLETA) ===\n");
+    for (int i = 0; i < total_simbolos; i++) {
+        printf("[%02d] %-12s | %-12s | %-6s | escopo: %-8s | nivel: %d | offset: %d\n",
+               i, tabela[i].id,
+               symtab_cat_to_str(tabela[i].cat),
+               symtab_type_to_str(tabela[i].tipo),
+               tabela[i].scope,
+               tabela[i].level,
+               tabela[i].offset);
+    }
+    printf("=====================================\n\n");
 }

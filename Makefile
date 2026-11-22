@@ -1,7 +1,7 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c99
 TARGET = complac
-SRCS = main.c lex.c token.c parser.c symtab.c diag.c opt.c log.c
+SRCS = main.c lex.c token.c parser.c symtab.c diag.c opt.c log.c gerador.c
 OBJS = $(SRCS:.c=.o)
 
 all: $(TARGET)

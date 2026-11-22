@@ -1,58 +1,50 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include "token.h"
+#include <string.h>
+#include "lex.h"
+#include "parser.h"
+#include "symtab.h"
+#include "gerador.h"
 #include "diag.h"
 #include "opt.h"
-#include "log.h"
-#include "lex.h"
-#include "symtab.h"
-#include "parser.h"
 
 int main(int argc, char *argv[]) {
-    /* 1. Processa argumentos da linha de comando */
+    // 1. Processa linha de comando
     opts_parse(argc, argv);
     const Options *opts = opts_get();
+    const char *arquivo_fonte = opts->filename;
 
-    /* 2. Inicializa o modulo de diagnosticos */
-    diag_init(opts->filename);
-
-    /* 3. Inicializa os ficheiros de log opcionais (.tk, .ts, .trc) */
-    log_init(opts->filename, opts->tokens, opts->symtab, opts->trace);
-
-    /* 4. Inicializa o analisador lexico com o ficheiro-fonte */
-    lex_init(opts->filename);
-
-    /* 5. Inicializa a Tabela de Simbolos */
-    symtab_init();
-
-    if (opts->trace) {
-        log_trace("Iniciando a analise do compilador COMPLAC...");
+    if (!arquivo_fonte) {
+        fprintf(stderr, "Uso: complac <arquivo.slac> [opcoes]\n");
+        return 1;
     }
 
-    /* 6. Dispara a analise sintatica descendente recursiva (consome lex sob demanda) */
+    // 2. Monta o nome do arquivo de saída trocando a extensão por .mepa
+    char arquivo_saida[256];
+    strncpy(arquivo_saida, arquivo_fonte, sizeof(arquivo_saida) - 1);
+    arquivo_saida[sizeof(arquivo_saida) - 1] = '\0';
+    char *ext = strrchr(arquivo_saida, '.');
+    if (ext) {
+        strcpy(ext, ".mepa");
+    } else {
+        strncat(arquivo_saida, ".mepa", sizeof(arquivo_saida) - strlen(arquivo_saida) - 1);
+    }
+
+    // 3. Inicializa os módulos
+    lex_init(arquivo_fonte);
+    symtab_init();
+    if (!gerador_init(arquivo_saida)) {
+        fprintf(stderr, "Erro ao criar arquivo MEPA: %s\n", arquivo_saida);
+        return 1;
+    }
+
+    // 4. Executa a compilação completa (Análise + Emissão MEPA)
     parse_program();
 
-    /* 7. Se solicitado --symtab, descarrega a tabela de simbolos consolidada */
-    if (opts->symtab) {
-        int count = symtab_get_count();
-        for (int i = 0; i < count; i++) {
-            const SymEntry *entry = symtab_get_entry(i);
-            if (entry != NULL) {
-                log_symtab_entry(entry->scope, entry->id,
-                                 symtab_cat_to_str(entry->cat),
-                                 symtab_type_to_str(entry->tipo), entry->extra);
-            }
-        }
-    }
-
-    if (opts->trace) {
-        log_trace("Compilacao concluida com sucesso.");
-    }
-
-    /* 8. Encerramento ordenado de todos os recursos */
-    lex_close();
+    // 5. Finaliza e descarrega os arquivos
+    gerador_encerrar();
     symtab_destroy();
-    log_close();
+    lex_close();
 
-    return EXIT_SUCCESS;
+    printf("Compilacao concluida com sucesso! Gerado: %s\n", arquivo_saida);
+    return 0;
 }

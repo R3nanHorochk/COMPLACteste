@@ -6,85 +6,28 @@
 #include "lex.h"
 #include "diag.h"
 #include "symtab.h"
-
-/*
-    ASDR = Analisador Sintático Descendente Recursivo
-    O papel do parser é consumir tokens do lexer e validar a gramática da linguagem.
-
-    Aqui ficam apenas:
-    - o estado atual do parser
-    - avanço do token
-    - match/consumo
-    - funções dos não-terminais
-    - chamadas recursivas
-
-    O que NÃO fica aqui:
-    - leitura do arquivo
-    - opções da linha de comando
-    - logs de token
-    - geração de código
-
-
-    Gramática:
-
-    G = (, , P, <prg>)
-    P:
-    <prg> ::= [<gvars>] {<subs>} <princ>
-    <gvars> ::= "sGLOBVARS" <decls>{<decls>}
-    <lvars> ::= "sLOCVARS" <decls>{<decls>}
-    <decls> ::= <id> {",“ <id>} "sKIND“ <type> ";“
-    <id> ::= "sIDENTIF"
-    <type> ::= (“sINT” | “sLOGIC" | “sCHR") [”[“ ”sCTEINT“ ”]“]
-    <subs> ::= (<func> | <proc>)
-    <func> ::= “sFUNC” <id> “(” [<param>] ”)” ”:” <type> [<lvars>] <bco>
-    <proc> ::= “sPROC” <id> “(” [<param>] ”)” [<lvars>] <bco>
-    <param> ::= [“sREF”] <id> ":“ <type> {",“ [“sREF”] <id> ":“ <type>}
-    <bco> ::= “sSTART” {<cmd> ";“} ”sEND”
-    <cmd> := <echo> | <get> | <case> | <chse> | <for> | <whle> |
-    <rept> | <call> | <ret> | <atr>
-    <vetr> ::= <id> ”[“ (”sCTEINT“ | <id>) ”]“
-    <echo> ::= “sECHO” ”(“ <elem> {”,“ <elem>} ”)“ ✅
-    <get> ::= “sGET” ”(“ (<id> | <vetr>) ”)“ ✅
-    <case> ::= “sCASE” “(“ <expr> ) <cmd> [”sOTHERWISE” <cmd>] "sEND" ✅
-    <chse> ::= "sCHOOSE" "(" <expr> ")" <mlst> "sEND" ✅
-    <mlst> ::= <mtch> {<mtch>} [<other>] ✅
-    <mtch> ::= "sMATCH" <mvlrs> "sIMPLIC" <cmd> ";" ✅
-    <mvlrs> ::= "sCTEINT" {"," "sCTEINT"} ✅
-    <othr> ::= "sOTHERS" "sIMPLIC" <cmd> ";" ✅
-    <for> ::= “sFOR” <id> “sFROM“ (<id> | “sCTEINT“) “sTO“ (<id> |
-    “sCTEINT“) [“sBY“ “sCTEINT“] “do“ <cmd> ✅
-    <whle> ::= “sWHILE” “(“ <expr> “)“ “sDO“ <cmd> ✅
-    Compiladores
-    19
-    <rept> ::= “sREPEAT” {<cmd> “;“} “sUNTIL” “(“ <expr> “)“ ✅
-    <call> ::= <id> “(“ [expr {“,“ <expr>}] “)“ ✅
-    <ret> ::= “sRETURN” <elem> ✅
-    <atr> ::= (<id> | <vetr>) “sATRIB” <elem> ✅
-    <elem> ::= <litl> | <id> | <vetr> | <call> | <expr> ✅
-    <litl> ::= “sSTRING” | “sCTEINT” | “sCTECHAR”
-    <expr> ::= <elogc> {”sOR” <elogc>} ✅
-    <elogc> ::= <erlac> {”sAND” <erlac} ✅
-    <erlac> ::= <earit> {<oprel> <earit>} ✅
-    <earit> ::= <earip> {<opari> <earip>} ✅
-    <earip> ::= <fact> {<oparp> <fact>} ✅
-    <fact> ::= <elem> | “sNEG“ <fact> | “sSUBRAT“ <fact> | “(“<expr>“)“ ✅
-    <oprel> ::= “sMAIOR” | “sMAIORIGUAL” | “sIGUAL” | “sMENOR” | “sMENORIGUAL” | “sDIFERENTE” ✅
-    <opari> ::= “sSOMA“ | “sSUBRAT“ ✅
-    <oparp> ::= “sMULT“ | “sDIV“ ✅
-    proc/func/param/subs ✅
-
-*/
+#include "gerador.h"
 
 static Token current_tok;
-
-/* Buffer de 1 token de lookahead além do current_tok. Necessário porque
-   <call> e <atr> (e <id>/<vetr> dentro de <elem>) começam ambos com
-   sIDENTIF: precisamos olhar o token seguinte para decidir qual função
-   do não-terminal chamar, sem "roubar" a responsabilidade de consumir
-   o próprio <id> de cada uma dessas funções. */
 static Token lookahead_tok;
 static int has_lookahead = 0;
 static int saw_main = 0;
+
+/* Gerenciamento de endereçamento na pilha da MEPA */
+static int offset_global = 0;
+static int offset_local = 0;
+static char escopo_atual_nome[64] = "global";
+static int func_atual_nparams = 0;
+static bool dentro_de_funcao = false;
+
+static char* int_to_str(int n) {
+    static char bufs[4][16];
+    static int idx = 0;
+    char *buf = bufs[idx];
+    idx = (idx + 1) % 4;
+    snprintf(buf, 16, "%d", n);
+    return buf;
+}
 
 static void advance(void) {
     if (has_lookahead) {
@@ -115,67 +58,65 @@ static void check(TokenCategoria expected) {
     }
 }
 
-/* Protótipos dos não-terminais para chamadas cruzadas/recursivas */
-static void parse_expr(void);   // ✅
-static void parse_factor(void); // ✅
-static void parse_cmd(void);    // ✅
-static void parse_block(void);  // ✅ <bco>
+static SimboloTipo parse_expr(void);
+static SimboloTipo parse_elogc(void);
+static SimboloTipo parse_erlac(void);
+static SimboloTipo parse_earit(void);
+static SimboloTipo parse_earip(void);
+static SimboloTipo parse_factor(void);
+static SimboloTipo parse_atom(void);
+static SimboloTipo parse_elem(void);
 
-/* Protótipos de declarações e tipos */
-static void parse_gvars(void);  // ✅
-static void parse_lvars(void);  // ✅
-static void parse_decls(SimboloCat cat);  // ✅ (cat: variáveis globais ou locais)
-static SimboloTipo parse_type(int *extra_out); // ✅ (extra_out: tamanho do vetor, ou NULL se não interessa)
-static void parse_id(void);     // ✅
+static void parse_cmd(void);
+static void parse_block(void);
+static void parse_cmd_list(void);
 
-/* Protótipos sub-rotinas e Parâmetros */
-static void parse_subs(void);   // ✅
-static void parse_func(void);   // ✅
-static void parse_proc(void);   // ✅
-static int parse_param(void);   // ✅ retorna a quantidade de parâmetros lidos
+static void parse_gvars(void);
+static void parse_lvars(void);
+static void parse_decls(SimboloCat cat);
+static SimboloTipo parse_type(int *extra_out);
+static void parse_id(void);
 
-/* Protótipo de comandos restantes */
-static void parse_echo(void);   // ✅
-static void parse_get(void);    // ✅
-static void parse_case(void);   // ✅
-static void parse_chse(void);   // ✅
-static void parse_mlst(void);   // ✅
-static void parse_mtch(void);   // ✅
-static void parse_mvlrs(void);  // ✅
-static void parse_othr(void);   // ✅
-static void parse_vetr(void);   // ✅
-static void parse_for(void);    // ✅
-static void parse_whle(void);   // ✅
-static void parse_rept(void);   // ✅
-static void parse_call(void);   // ✅
-static void parse_ret(void);    // ✅
-static void parse_atr(void);    // ✅
-static void parse_elem(void);   // ✅
-static void parse_atom(void);
-static void parse_cmd_list(void); // auxiliar (não é não-terminal da gramática)
+static void parse_subs(void);
+static void parse_func(void);
+static void parse_proc(void);
+static int  parse_param(char nomes[][32], SimboloTipo tipos[], int extras[]);
 
-static void require_declared(const char *name, int line) {
-    if (symtab_lookup(name) == NULL) {
+static void parse_echo(void);
+static void parse_get(void);
+static void parse_case(void);
+static void parse_chse(void);
+static void parse_mlst(const char *rotulo_fim);
+static void parse_mtch(const char *rotulo_fim);
+static void parse_mvlrs(void);
+static void parse_othr(void);
+static void parse_vetr(void);
+static void parse_for(void);
+static void parse_whle(void);
+static void parse_rept(void);
+static void parse_call(void);
+static void parse_ret(void);
+static void parse_atr(void);
+
+static Simbolo* require_declared(const char *name, int line) {
+    Simbolo *s = symtab_lookup(name);
+    if (s == NULL) {
         char msg[160];
         snprintf(msg, sizeof(msg), "identificador '%s' nao declarado", name);
         diag_error(line, msg);
     }
+    return s;
 }
 
-static void parse_use_id(void) {
+static Simbolo* parse_use_id(void) {
     char name[32];
     int line = current_tok.line;
     strncpy(name, current_tok.lexeme, sizeof(name) - 1);
     name[sizeof(name) - 1] = '\0';
     parse_id();
-    require_declared(name, line);
+    return require_declared(name, line);
 }
 
-
-/* <decls> ::= <id> {",“ <id>} "sKIND“ <type> ";“
-   cat indica se estes identificadores são variáveis globais ou locais,
-   já que a mesma produção <decls> é reaproveitada por <gvars> e <lvars>,
-   mas cada uso deve gerar símbolos de categoria diferente na TS. */
 #define PARSE_DECLS_MAX_IDS 64
 static void parse_decls(SimboloCat cat) {
     char nomes[PARSE_DECLS_MAX_IDS][32];
@@ -184,9 +125,6 @@ static void parse_decls(SimboloCat cat) {
     SimboloTipo tipo;
     int extra = 0;
 
-    /* Guardamos os lexemas porque current_tok muda a cada advance();
-       só sabemos o tipo/tamanho no final da produção (depois de "sKIND"),
-       então a inserção na TS fica para depois de parse_type(). */
     strncpy(nomes[n], current_tok.lexeme, sizeof(nomes[n]) - 1);
     nomes[n][sizeof(nomes[n]) - 1] = '\0';
     n++;
@@ -207,34 +145,49 @@ static void parse_decls(SimboloCat cat) {
     check(sPONTOVIRG);
 
     for (i = 0; i < n; i++) {
-        if (!symtab_insert(nomes[i], cat, tipo, extra)) {
-            diag_error_syntax(current_tok.line, "identificador nao duplicado no escopo", nomes[i]);
+        int desloc;
+        int espaco = (extra > 0) ? (extra + 1) : 1;
+
+        if (cat == CAT_VAR_GLOBAL) {
+            desloc = offset_global;
+            offset_global += espaco;
+        } else {
+            desloc = offset_local;
+            offset_local += espaco;
+        }
+
+        if (!symtab_insert(nomes[i], cat, tipo, desloc, extra)) {
+            diag_error_syntax(current_tok.line, "identificador duplicado no escopo", nomes[i]);
         }
     }
 }
 
-/* <gvars> ::= "sGLOBVARS" <decls>{<decls>} */
 static void parse_gvars(void) {
     check(sGLOBVARS);
+    int offset_antes = offset_global;
     parse_decls(CAT_VAR_GLOBAL);
     while (current_tok.cat == sIDENTIF) {
         parse_decls(CAT_VAR_GLOBAL);
     }
+    int total_alocado = offset_global - offset_antes;
+    if (total_alocado > 0) {
+        gera_instr_mepa(NULL, "AMEM", int_to_str(total_alocado), NULL);
+    }
 }
 
-/* <lvars> ::= "sLOCVARS" <decls>{<decls>} */
 static void parse_lvars(void) {
     check(sLOCVARS);
+    int offset_antes = offset_local;
     parse_decls(CAT_VAR_LOCAL);
     while (current_tok.cat == sIDENTIF) {
         parse_decls(CAT_VAR_LOCAL);
     }
+    int total_alocado = offset_local - offset_antes;
+    if (total_alocado > 0) {
+        gera_instr_mepa(NULL, "AMEM", int_to_str(total_alocado), NULL);
+    }
 }
 
-/* <type> ::= (“sINT” | “sLOGIC" | “sCHR") [”[“ ”sCTEINT“ ”]“]
-   extra_out recebe o tamanho do vetor quando presente, ou 0 quando a
-   declaração não é um vetor. Pode ser NULL quando quem chama não precisa
-   dessa informação (ex.: tipo de retorno de função, que nunca é vetor). */
 static SimboloTipo parse_type(int *extra_out) {
     SimboloTipo tipo;
 
@@ -249,7 +202,7 @@ static SimboloTipo parse_type(int *extra_out) {
         advance();
     } else {
         diag_error_syntax(current_tok.line, "sINT, sLOGIC ou sCHR", tokenCatNome(current_tok.cat));
-        tipo = TIPO_INT; /* valor arbitrário só para permitir a análise prosseguir */
+        tipo = TIPO_INT;
     }
 
     if (extra_out != NULL) {
@@ -260,8 +213,6 @@ static SimboloTipo parse_type(int *extra_out) {
         int tamanho = 0;
         check(sABRECOL);
         if (current_tok.cat == sCTEINT) {
-            /* Token só guarda o lexema como texto; convertemos aqui para
-               gravar o tamanho do vetor no campo "extra" da TS. */
             tamanho = atoi(current_tok.lexeme);
         }
         check(sCTEINT);
@@ -274,35 +225,21 @@ static SimboloTipo parse_type(int *extra_out) {
     return tipo;
 }
 
-/* <id> ::= "sIDENTIF" */
 static void parse_id(void) {
     check(sIDENTIF);
 }
 
-/* <param> ::= ["sREF"] <id> ":" <type> {"," ["sREF"] <id> ":" <type>}
-   Retorna a quantidade de parâmetros lidos — usado como "extra" ao
-   inserir a própria sub-rotina no escopo externo (ver parse_func e
-   parse_proc). Cada parâmetro é inserido no escopo ATUAL, que já deve
-   ser o escopo próprio da sub-rotina, aberto por quem chamou esta função.
-   Observação: "sREF" é consumido mas não é gravado em lugar nenhum, pois
-   o struct Simbolo não tem campo para "passado por referência". */
-static int parse_param(void) {
+static int parse_param(char nomes[][32], SimboloTipo tipos[], int extras[]) {
     int count = 0;
-    char nome[32];
-    SimboloTipo tipo;
-    int extra;
 
     if (current_tok.cat == sREF) {
         check(sREF);
     }
-    strncpy(nome, current_tok.lexeme, sizeof(nome) - 1);
-    nome[sizeof(nome) - 1] = '\0';
+    strncpy(nomes[count], current_tok.lexeme, 31);
+    nomes[count][31] = '\0';
     parse_id();
     check(sDOISPONTOS);
-    tipo = parse_type(&extra);
-    if (!symtab_insert(nome, CAT_PARAM, tipo, extra)) {
-        diag_error_syntax(current_tok.line, "identificador de parametro nao duplicado", nome);
-    }
+    tipos[count] = parse_type(&extras[count]);
     count++;
 
     while (current_tok.cat == sVIRG) {
@@ -310,31 +247,25 @@ static int parse_param(void) {
         if (current_tok.cat == sREF) {
             check(sREF);
         }
-        strncpy(nome, current_tok.lexeme, sizeof(nome) - 1);
-        nome[sizeof(nome) - 1] = '\0';
+        strncpy(nomes[count], current_tok.lexeme, 31);
+        nomes[count][31] = '\0';
         parse_id();
         check(sDOISPONTOS);
-        tipo = parse_type(&extra);
-        if (!symtab_insert(nome, CAT_PARAM, tipo, extra)) {
-            diag_error_syntax(current_tok.line, "identificador de parametro nao duplicado", nome);
-        }
+        tipos[count] = parse_type(&extras[count]);
         count++;
     }
 
     return count;
 }
 
-/* <func> ::= "sFUNC" <id> "(" [<param>] ")" ":" <type> [<lvars>] <bco>
-   Quem controla a abertura/fechamento do escopo da função é este parser
-   (responsabilidade descrita no enunciado). O símbolo da própria função
-   só é inserido no escopo externo DEPOIS de fechar o escopo da função —
-   ver a nota "sobre a Tabela de Símbolos" no cabeçalho do arquivo, que
-   explica por que essa ordem é necessária e qual a limitação dela para
-   chamadas recursivas. */
 static void parse_func(void) {
     char nome[32];
     SimboloTipo tipoRet;
     int nparams = 0;
+    char rotulo_sub[16];
+    char p_nomes[MAX_PARAMS][32];
+    SimboloTipo p_tipos[MAX_PARAMS];
+    int p_extras[MAX_PARAMS];
 
     if (saw_main) {
         diag_error(current_tok.line, "main deve ser a ultima sub-rotina do programa");
@@ -345,71 +276,142 @@ static void parse_func(void) {
     nome[sizeof(nome) - 1] = '\0';
     parse_id();
 
-    if (!symtab_insert(nome, CAT_FUNCAO, TIPO_VOID, 0)) {
-        diag_error(current_tok.line, "identificador de funcao nao duplicado");
+    strncpy(rotulo_sub, novo_rotulo(), sizeof(rotulo_sub));
+
+    if (!symtab_insert(nome, CAT_FUNCAO, TIPO_VOID, 0, 0)) {
+        diag_error(current_tok.line, "identificador de funcao duplicado");
     }
+    Simbolo *s_func = symtab_lookup(nome);
+    if (s_func) {
+        strncpy(s_func->rotulo, rotulo_sub, sizeof(s_func->rotulo) - 1);
+    }
+
     symtab_enter_scope(nome);
+    strncpy(escopo_atual_nome, nome, sizeof(escopo_atual_nome) - 1);
+    offset_local = 0;
 
     check(sABREPAR);
     if (current_tok.cat != sFECHAPAR) {
-        nparams = parse_param();
+        nparams = parse_param(p_nomes, p_tipos, p_extras);
     }
     check(sFECHAPAR);
     check(sDOISPONTOS);
-    tipoRet = parse_type(NULL); /* retorno de função nunca é vetor */
+    tipoRet = parse_type(NULL);
+    if (s_func) {
+        s_func->tipo = tipoRet;
+    }
+
+    /* Insere parâmetros com deslocamentos MEPA corretos:
+       Primeiro parâmetro em -(nparams + 2), último em -3 */
+    for (int i = 0; i < nparams; i++) {
+        int desloc = -(nparams + 2 - i);
+        if (!symtab_insert(p_nomes[i], CAT_PARAM, p_tipos[i], desloc, p_extras[i])) {
+            diag_error_syntax(current_tok.line, "identificador de parametro duplicado", p_nomes[i]);
+        }
+    }
+
+    func_atual_nparams = nparams;
+    dentro_de_funcao = true;
+
+    gera_instr_mepa(rotulo_sub, "ENPR", int_to_str(1), NULL);
 
     if (current_tok.cat == sLOCVARS) {
         parse_lvars();
     }
     parse_block();
 
-    symtab_leave_scope();
+    if (offset_local > 0) {
+        gera_instr_mepa(NULL, "DMEM", int_to_str(offset_local), NULL);
+    }
+    
+    // Desempilha a quantidade de parâmetros da função
+    gera_instr_mepa(NULL, "RTPR", int_to_str(1), int_to_str(func_atual_nparams));
 
+    dentro_de_funcao = false;
+    symtab_leave_scope();
     symtab_update_signature(nome, tipoRet, nparams);
 }
 
-/* <proc> ::= "sPROC" <id> "(" [<param>] ")" [<lvars>] <bco>
-   (mesma lógica de escopo/inserção de parse_func, sem tipo de retorno) */
 static void parse_proc(void) {
     char nome[32];
     int nparams = 0;
+    char rotulo_sub[16];
+    char p_nomes[MAX_PARAMS][32];
+    SimboloTipo p_tipos[MAX_PARAMS];
+    int p_extras[MAX_PARAMS];
 
     check(sPROC);
     strncpy(nome, current_tok.lexeme, sizeof(nome) - 1);
     nome[sizeof(nome) - 1] = '\0';
     parse_id();
 
-    if (strcmp(nome, "main") == 0) {
+    int eh_main = (strcmp(nome, "main") == 0);
+
+    if (eh_main) {
         if (saw_main) diag_error(current_tok.line, "procedimento main duplicado");
         saw_main = 1;
-    } else if (saw_main) {
-        diag_error(current_tok.line, "main deve ser a ultima sub-rotina do programa");
+        strncpy(rotulo_sub, "R_MAIN", sizeof(rotulo_sub));
+    } else {
+        if (saw_main) {
+            diag_error(current_tok.line, "main deve ser a ultima sub-rotina do programa");
+        }
+        strncpy(rotulo_sub, novo_rotulo(), sizeof(rotulo_sub));
     }
 
-    if (!symtab_insert(nome, CAT_PROCEDIMENTO, TIPO_VOID, 0)) {
-        diag_error(current_tok.line, "identificador de procedimento nao duplicado");
+    if (!symtab_insert(nome, CAT_PROCEDIMENTO, TIPO_VOID, 0, 0)) {
+        diag_error(current_tok.line, "identificador de procedimento duplicado");
     }
+    Simbolo *s_proc = symtab_lookup(nome);
+    if (s_proc) {
+        strncpy(s_proc->rotulo, rotulo_sub, sizeof(s_proc->rotulo) - 1);
+    }
+
     symtab_enter_scope(nome);
+    strncpy(escopo_atual_nome, nome, sizeof(escopo_atual_nome) - 1);
+    offset_local = 0;
 
     check(sABREPAR);
     if (current_tok.cat != sFECHAPAR) {
-        nparams = parse_param();
+        nparams = parse_param(p_nomes, p_tipos, p_extras);
     }
-    if (strcmp(nome, "main") == 0 && nparams != 0) {
+    if (eh_main && nparams != 0) {
         diag_error(current_tok.line, "proc main nao pode receber parametros");
     }
     check(sFECHAPAR);
+
+    for (int i = 0; i < nparams; i++) {
+        int desloc = -(nparams + 2 - i);
+        if (!symtab_insert(p_nomes[i], CAT_PARAM, p_tipos[i], desloc, p_extras[i])) {
+            diag_error_syntax(current_tok.line, "identificador de parametro duplicado", p_nomes[i]);
+        }
+    }
+
+    if (!eh_main) {
+        gera_instr_mepa(rotulo_sub, "ENPR", int_to_str(1), NULL);
+    } else {
+        gera_instr_mepa(rotulo_sub, "NADA", NULL, NULL);
+    }
+
     if (current_tok.cat == sLOCVARS) {
         parse_lvars();
     }
     parse_block();
 
-    symtab_leave_scope();
+    if (eh_main) {
+        if (offset_local > 0) {
+            gera_instr_mepa(NULL, "DMEM", int_to_str(offset_local), NULL);
+        }
+    } else {
+        if (offset_local > 0) {
+            gera_instr_mepa(NULL, "DMEM", int_to_str(offset_local), NULL);
+        }
+        gera_instr_mepa(NULL, "RTPR", int_to_str(1), int_to_str(nparams));
+    }
 
+    symtab_leave_scope();
     symtab_update_signature(nome, TIPO_VOID, nparams);
 }
 
-/* <subs> ::= (<func> | <proc>) */
 static void parse_subs(void) {
     if (current_tok.cat == sFUNC) {
         parse_func();
@@ -420,21 +422,12 @@ static void parse_subs(void) {
     }
 }
 
-/* <bco> ::= "sSTART" {<cmd> ";"} "sEND"
-   Não abrimos um escopo de symtab aqui: nessa gramática só existe um
-   <bco> por sub-rotina (o corpo dela), e nenhum <cmd> dentro do bloco
-   declara identificadores novos — todas as declarações (parâmetros e
-   locvars) já acontecem antes do <bco>, no escopo aberto por parse_func/
-   parse_proc. Um escopo extra aqui ficaria sempre vazio. */
 static void parse_block(void) {
     check(sSTART);
     parse_cmd_list();
     check(sEND);
 }
 
-/* Auxiliar: trata a repetição {<cmd> ";"} usada em <bco>, <case>, <for>,
-   <whle> e <rept>. Não corresponde a um não-terminal próprio da gramática,
-   apenas evita duplicar o mesmo laço em cinco lugares diferentes. */
 static void parse_cmd_list(void) {
     while (current_tok.cat == sECHO   || current_tok.cat == sGET    ||
            current_tok.cat == sCASE   || current_tok.cat == sCHOOSE ||
@@ -446,31 +439,29 @@ static void parse_cmd_list(void) {
     }
 }
 
-/* <vetr> ::= <id> "[" ("sCTEINT" | <id>) "]" */
 static void parse_vetr(void) {
     char nome[32];
-    int line = current_tok.line;
     strncpy(nome, current_tok.lexeme, sizeof(nome) - 1);
     nome[sizeof(nome) - 1] = '\0';
-    parse_use_id();
-    {
-        Simbolo *s = symtab_lookup(nome);
-        if (s && s->extra <= 0) {
-            diag_error(line, "identificador nao e um vetor");
-        }
+    Simbolo *s = parse_use_id();
+    if (s && s->extra <= 0) {
+        diag_error(current_tok.line, "identificador nao e um vetor");
     }
     check(sABRECOL);
     if (current_tok.cat == sCTEINT) {
+        gera_instr_mepa(NULL, "CRCT", current_tok.lexeme, NULL);
         advance();
     } else if (current_tok.cat == sIDENTIF) {
-        parse_use_id();
+        Simbolo *idx = parse_use_id();
+        if (idx) {
+            gera_instr_mepa(NULL, "CRVL", int_to_str(idx->level), int_to_str(idx->offset));
+        }
     } else {
         diag_error_syntax(current_tok.line, "sCTEINT ou sIDENTIF", tokenCatNome(current_tok.cat));
     }
     check(sFECHACOL);
 }
 
-/* <call> ::= <id> "(" [<expr> {"," <expr>}] ")" */
 static void parse_call(void) {
     char nome[32];
     int line = current_tok.line;
@@ -478,84 +469,162 @@ static void parse_call(void) {
     nome[sizeof(nome) - 1] = '\0';
     parse_id();
 
-    {
-        Simbolo *s = symtab_lookup(nome);
-        if (!s || (s->cat != CAT_FUNCAO && s->cat != CAT_PROCEDIMENTO)) {
-            char msg[160];
-            snprintf(msg, sizeof(msg), "sub-rotina '%s' nao declarada", nome);
-            diag_error(line, msg);
-        }
+    Simbolo *s = symtab_lookup(nome);
+    if (!s || (s->cat != CAT_FUNCAO && s->cat != CAT_PROCEDIMENTO)) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "sub-rotina '%s' nao declarada", nome);
+        diag_error(line, msg);
     }
+
+    if (s && s->cat == CAT_FUNCAO) {
+        gera_instr_mepa(NULL, "AMEM", "1", NULL);
+    }
+
     check(sABREPAR);
+    int arg_count = 0;
     if (current_tok.cat != sFECHAPAR) {
         parse_expr();
+        arg_count++;
         while (current_tok.cat == sVIRG) {
             check(sVIRG);
             parse_expr();
+            arg_count++;
+        }
+    }
+    check(sFECHAPAR);
+
+    if (s && s->extra > 0 && s->extra != arg_count) {
+        diag_error(line, "quantidade incorreta de argumentos na chamada da sub-rotina");
+    }
+
+    if (s && strlen(s->rotulo) > 0) {
+        gera_instr_mepa(NULL, "CHPR", s->rotulo, int_to_str(1));
+    }
+}
+
+static void parse_atr(void) {
+    char nome[32];
+    strncpy(nome, current_tok.lexeme, sizeof(nome) - 1);
+    nome[sizeof(nome) - 1] = '\0';
+    int line = current_tok.line;
+
+    if (peek().cat == sABRECOL) {
+        parse_vetr();
+        check(sATRIB);
+        parse_elem();
+        gera_instr_mepa(NULL, "ARMI", NULL, NULL);
+    } else {
+        Simbolo *s = parse_use_id();
+        check(sATRIB);
+        SimboloTipo t_expr = parse_elem();
+
+        if (s && s->tipo != t_expr && t_expr != TIPO_INDEF) {
+            diag_error(line, "incompatibilidade de tipos na atribuicao");
+        }
+
+        if (s) {
+            gera_instr_mepa(NULL, "ARMZ", int_to_str(s->level), int_to_str(s->offset));
+        }
+    }
+}
+
+static void parse_ret(void) {
+    check(sRETURN);
+    SimboloTipo t = parse_elem();
+    (void)t;
+    if (dentro_de_funcao) {
+        int endereco_ret = -(func_atual_nparams + 3);
+        gera_instr_mepa(NULL, "ARMZ", "1", int_to_str(endereco_ret));
+    }
+}
+
+static void parse_echo(void) {
+    check(sECHO);
+    check(sABREPAR);
+
+    while (1) {
+        if (current_tok.cat == sSTRING) {
+            char str_formatada[256];
+            if (current_tok.lexeme[0] == '"') {
+                strncpy(str_formatada, current_tok.lexeme, sizeof(str_formatada) - 1);
+            } else {
+                snprintf(str_formatada, sizeof(str_formatada), "\"%s\"", current_tok.lexeme);
+            }
+            str_formatada[sizeof(str_formatada) - 1] = '\0';
+
+            gera_instr_mepa(NULL, "CRST", str_formatada, NULL);
+            int len = (int)strlen(str_formatada) - 2;
+            if (len < 0) len = 0;
+            gera_instr_mepa(NULL, "IMPS", int_to_str(len + 1), NULL);
+            advance();
+        } else {
+            SimboloTipo t = parse_elem();
+            if (t == TIPO_CHR) {
+                gera_instr_mepa(NULL, "IMPC", NULL, NULL);
+            } else {
+                gera_instr_mepa(NULL, "IMPR", NULL, NULL);
+            }
+        }
+
+        if (current_tok.cat == sVIRG) {
+            check(sVIRG);
+        } else {
+            break;
         }
     }
     check(sFECHAPAR);
 }
 
-/* <atr> ::= (<id> | <vetr>) "sATRIB" <elem>
-   <id> e <vetr> compartilham o mesmo prefixo (sIDENTIF); usamos peek()
-   para decidir sem consumir o token antes da hora. */
-static void parse_atr(void) {
-    if (peek().cat == sABRECOL) {
-        parse_vetr();
-    } else {
-        parse_use_id();
-    }
-    check(sATRIB);
-    parse_elem();
-}
-
-/* <ret> ::= "sRETURN" <elem> */
-static void parse_ret(void) {
-    check(sRETURN);
-    parse_elem();
-}
-
-/* <echo> ::= "sECHO" "(" <elem> {"," <elem>} ")" */
-static void parse_echo(void) {
-    check(sECHO);
-    check(sABREPAR);
-    parse_elem();
-    while (current_tok.cat == sVIRG) {
-        check(sVIRG);
-        parse_elem();
-    }
-    check(sFECHAPAR);
-}
-
-/* <get> ::= "sGET" "(" (<id> | <vetr>) ")" */
 static void parse_get(void) {
     check(sGET);
     check(sABREPAR);
+    char nome[32];
+    strncpy(nome, current_tok.lexeme, sizeof(nome) - 1);
+    nome[sizeof(nome) - 1] = '\0';
+
     if (peek().cat == sABRECOL) {
         parse_vetr();
+        gera_instr_mepa(NULL, "LEIT", NULL, NULL);
+        gera_instr_mepa(NULL, "ARMI", NULL, NULL);
     } else {
-        parse_use_id();
+        Simbolo *s = parse_use_id();
+        gera_instr_mepa(NULL, "LEIT", NULL, NULL);
+        if (s) {
+            gera_instr_mepa(NULL, "ARMZ", int_to_str(s->level), int_to_str(s->offset));
+        }
     }
     check(sFECHAPAR);
 }
 
-/* <case> ::= "sCASE" "(" <expr> ")" {<cmd> ";"} ["sOTHERWISE" {<cmd> ";"}] "sEND"
-   (ver nota no cabeçalho do arquivo sobre a divergência com o apêndice) */
 static void parse_case(void) {
     check(sCASE);
     check(sABREPAR);
-    parse_expr();
+    SimboloTipo t = parse_expr();
+    if (t != TIPO_BOOL) {
+        diag_error(current_tok.line, "expressao de case deve ser logic");
+    }
     check(sFECHAPAR);
+
+    char rotulo_senao[16], rotulo_fim[16];
+    strncpy(rotulo_senao, novo_rotulo(), sizeof(rotulo_senao));
+    strncpy(rotulo_fim, novo_rotulo(), sizeof(rotulo_fim));
+
+    gera_instr_mepa(NULL, "DSVF", rotulo_senao, NULL);
+
     parse_cmd_list();
+
     if (current_tok.cat == sOTHERWISE) {
+        gera_instr_mepa(NULL, "DSVS", rotulo_fim, NULL);
+        gera_instr_mepa(rotulo_senao, "NADA", NULL, NULL);
         check(sOTHERWISE);
         parse_cmd_list();
+        gera_instr_mepa(rotulo_fim, "NADA", NULL, NULL);
+    } else {
+        gera_instr_mepa(rotulo_senao, "NADA", NULL, NULL);
     }
     check(sEND);
 }
 
-/* <mvlrs> ::= "sCTEINT" {"," "sCTEINT"} */
 static void parse_mvlrs(void) {
     check(sCTEINT);
     while (current_tok.cat == sVIRG) {
@@ -564,16 +633,25 @@ static void parse_mvlrs(void) {
     }
 }
 
-/* <mtch> ::= "sMATCH" <mvlrs> "sIMPLIC" <cmd> ";" */
-static void parse_mtch(void) {
+static void parse_mtch(const char *rotulo_fim) {
+    char rot_prox[16];
+    strncpy(rot_prox, novo_rotulo(), sizeof(rot_prox));
+
     check(sMATCH);
+    gera_instr_mepa(NULL, "CRVL", "0", "0"); 
+    gera_instr_mepa(NULL, "CRCT", current_tok.lexeme, NULL);
+    gera_instr_mepa(NULL, "CMIG", NULL, NULL);
+    gera_instr_mepa(NULL, "DSVF", rot_prox, NULL);
+
     parse_mvlrs();
     check(sIMPLIC);
     parse_cmd();
     check(sPONTOVIRG);
+
+    gera_instr_mepa(NULL, "DSVS", rotulo_fim, NULL);
+    gera_instr_mepa(rot_prox, "NADA", NULL, NULL);
 }
 
-/* <othr> ::= "sOTHERS" "sIMPLIC" <cmd> ";" */
 static void parse_othr(void) {
     check(sOTHERS);
     check(sIMPLIC);
@@ -581,108 +659,143 @@ static void parse_othr(void) {
     check(sPONTOVIRG);
 }
 
-/* <mlst> ::= <mtch> {<mtch>} [<othr>] */
-static void parse_mlst(void) {
-    parse_mtch();
+static void parse_mlst(const char *rotulo_fim) {
+    parse_mtch(rotulo_fim);
     while (current_tok.cat == sMATCH) {
-        parse_mtch();
+        parse_mtch(rotulo_fim);
     }
     if (current_tok.cat == sOTHERS) {
         parse_othr();
     }
 }
 
-/* <chse> ::= "sCHOOSE" "(" <expr> ")" <mlst> "sEND" */
 static void parse_chse(void) {
     check(sCHOOSE);
     check(sABREPAR);
     parse_expr();
     check(sFECHAPAR);
-    parse_mlst();
+
+    char rotulo_fim[16];
+    strncpy(rotulo_fim, novo_rotulo(), sizeof(rotulo_fim));
+
+    parse_mlst(rotulo_fim);
     check(sEND);
+
+    gera_instr_mepa(rotulo_fim, "NADA", NULL, NULL);
 }
 
-/* <for> ::= "sFOR" <id> "sFROM" (<id>|"sCTEINT") "sTO" (<id>|"sCTEINT")
-             ["sBY" "sCTEINT"] "sDO" {<cmd> ";"} "sEND"
-   (ver nota no cabeçalho sobre "end" e lista de comandos) */
 static void parse_for(void) {
     check(sFOR);
-    parse_use_id();
+    Simbolo *s = parse_use_id();
     check(sFROM);
-    if (current_tok.cat == sIDENTIF || current_tok.cat == sCTEINT) {
-        if (current_tok.cat == sIDENTIF) parse_use_id(); else advance();
+
+    char rot_ini[16], rot_fim[16];
+    strncpy(rot_ini, novo_rotulo(), sizeof(rot_ini));
+    strncpy(rot_fim, novo_rotulo(), sizeof(rot_fim));
+
+    if (current_tok.cat == sCTEINT) {
+        gera_instr_mepa(NULL, "CRCT", current_tok.lexeme, NULL);
+        advance();
     } else {
-        diag_error_syntax(current_tok.line, "sIDENTIF ou sCTEINT", tokenCatNome(current_tok.cat));
+        Simbolo *s_ini = parse_use_id();
+        if (s_ini) gera_instr_mepa(NULL, "CRVL", int_to_str(s_ini->level), int_to_str(s_ini->offset));
     }
+    if (s) {
+        gera_instr_mepa(NULL, "ARMZ", int_to_str(s->level), int_to_str(s->offset));
+    }
+
+    gera_instr_mepa(rot_ini, "NADA", NULL, NULL);
+
     check(sTO);
-    if (current_tok.cat == sIDENTIF || current_tok.cat == sCTEINT) {
-        if (current_tok.cat == sIDENTIF) parse_use_id(); else advance();
-    } else {
-        diag_error_syntax(current_tok.line, "sIDENTIF ou sCTEINT", tokenCatNome(current_tok.cat));
+    if (s) {
+        gera_instr_mepa(NULL, "CRVL", int_to_str(s->level), int_to_str(s->offset));
     }
+    if (current_tok.cat == sCTEINT) {
+        gera_instr_mepa(NULL, "CRCT", current_tok.lexeme, NULL);
+        advance();
+    } else {
+        Simbolo *s_fim = parse_use_id();
+        if (s_fim) gera_instr_mepa(NULL, "CRVL", int_to_str(s_fim->level), int_to_str(s_fim->offset));
+    }
+    gera_instr_mepa(NULL, "CMEG", NULL, NULL);
+    gera_instr_mepa(NULL, "DSVF", rot_fim, NULL);
+
+    int passo = 1;
     if (current_tok.cat == sBY) {
         check(sBY);
+        passo = atoi(current_tok.lexeme);
         check(sCTEINT);
     }
     check(sDO);
     parse_cmd_list();
     check(sEND);
+
+    if (s) {
+        gera_instr_mepa(NULL, "CRVL", int_to_str(s->level), int_to_str(s->offset));
+        gera_instr_mepa(NULL, "CRCT", int_to_str(passo), NULL);
+        gera_instr_mepa(NULL, "SOMA", NULL, NULL);
+        gera_instr_mepa(NULL, "ARMZ", int_to_str(s->level), int_to_str(s->offset));
+    }
+    gera_instr_mepa(NULL, "DSVS", rot_ini, NULL);
+    gera_instr_mepa(rot_fim, "NADA", NULL, NULL);
 }
 
-/* <whle> ::= "sWHILE" "(" <expr> ")" "sDO" {<cmd> ";"} "sEND"
-   (ver nota no cabeçalho sobre "end" e lista de comandos) */
 static void parse_whle(void) {
     check(sWHILE);
     check(sABREPAR);
-    parse_expr();
+
+    char rot_ini[16], rot_fim[16];
+    strncpy(rot_ini, novo_rotulo(), sizeof(rot_ini));
+    strncpy(rot_fim, novo_rotulo(), sizeof(rot_fim));
+
+    gera_instr_mepa(rot_ini, "NADA", NULL, NULL);
+
+    SimboloTipo t = parse_expr();
+    if (t != TIPO_BOOL) {
+        diag_error(current_tok.line, "condicao do while deve ser logic");
+    }
     check(sFECHAPAR);
     check(sDO);
+
+    gera_instr_mepa(NULL, "DSVF", rot_fim, NULL);
+
     parse_cmd_list();
     check(sEND);
+
+    gera_instr_mepa(NULL, "DSVS", rot_ini, NULL);
+    gera_instr_mepa(rot_fim, "NADA", NULL, NULL);
 }
 
-/* <rept> ::= "sREPEAT" {<cmd> ";"} "sUNTIL" "(" <expr> ")" */
 static void parse_rept(void) {
     check(sREPEAT);
+
+    char rot_ini[16];
+    strncpy(rot_ini, novo_rotulo(), sizeof(rot_ini));
+
+    gera_instr_mepa(rot_ini, "NADA", NULL, NULL);
+
     parse_cmd_list();
     check(sUNTIL);
     check(sABREPAR);
-    parse_expr();
+    SimboloTipo t = parse_expr();
+    if (t != TIPO_BOOL) {
+        diag_error(current_tok.line, "condicao do repeat deve ser logic");
+    }
     check(sFECHAPAR);
+
+    gera_instr_mepa(NULL, "DSVF", rot_ini, NULL);
 }
 
-/* <cmd> ::= <echo> | <get> | <case> | <chse> | <for> | <whle> |
-             <rept> | <call> | <ret> | <atr>
-
-   <call> e <atr> começam ambos com sIDENTIF: usamos peek() apenas para
-   decidir qual função chamar, sem consumir o id aqui — cada função
-   consome o seu próprio <id>. */
 static void parse_cmd(void) {
     switch (current_tok.cat) {
-        case sECHO:
-            parse_echo();
-            break;
-        case sGET:
-            parse_get();
-            break;
-        case sCASE:
-            parse_case();
-            break;
-        case sCHOOSE:
-            parse_chse();
-            break;
-        case sFOR:
-            parse_for();
-            break;
-        case sWHILE:
-            parse_whle();
-            break;
-        case sREPEAT:
-            parse_rept();
-            break;
-        case sRETURN:
-            parse_ret();
-            break;
+        case sECHO:   parse_echo(); break;
+        case sGET:    parse_get(); break;
+        case sCASE:   parse_case(); break;
+        case sCHOOSE: parse_chse(); break;
+        case sFOR:    parse_for(); break;
+        case sWHILE:  parse_whle(); break;
+        case sREPEAT: parse_rept(); break;
+        case sRETURN: parse_ret(); break;
         case sIDENTIF:
             if (peek().cat == sABREPAR) {
                 parse_call();
@@ -696,115 +809,191 @@ static void parse_cmd(void) {
     }
 }
 
-/* <elem> ::= <litl> | <id> | <vetr> | <call>
-   Observação: a alternativa <expr> listada para <elem> no apêndice é
-   redundante/inacessível aqui — expressões entre parênteses já são
-   tratadas em <fact> como "(" <expr> ")"; se <elem> também aceitasse
-   <expr> diretamente teríamos recursão sem consumo de token. */
-static void parse_atom(void) {
-    /* <litl> ::= "sSTRING" | "sCTEINT" | "sCTECHAR" */
-    if (current_tok.cat == sSTRING || current_tok.cat == sCTEINT || current_tok.cat == sCTECHAR) {
+static SimboloTipo parse_atom(void) {
+    if (current_tok.cat == sSTRING) {
+        char str_formatada[256];
+        if (current_tok.lexeme[0] == '"') {
+            strncpy(str_formatada, current_tok.lexeme, sizeof(str_formatada) - 1);
+        } else {
+            snprintf(str_formatada, sizeof(str_formatada), "\"%s\"", current_tok.lexeme);
+        }
+        str_formatada[sizeof(str_formatada) - 1] = '\0';
+        gera_instr_mepa(NULL, "CRST", str_formatada, NULL);
         advance();
-        return;
+        return TIPO_CHR;
+    }
+    if (current_tok.cat == sCTEINT) {
+        gera_instr_mepa(NULL, "CRCT", current_tok.lexeme, NULL);
+        advance();
+        return TIPO_INT;
+    }
+    if (current_tok.cat == sCTECHAR) {
+        char val[16];
+        snprintf(val, sizeof(val), "%d", (unsigned char)current_tok.lexeme[1]);
+        gera_instr_mepa(NULL, "CRCT", val, NULL);
+        advance();
+        return TIPO_CHR;
     }
 
     if (current_tok.cat == sIDENTIF) {
         TokenCategoria prox = peek().cat;
         if (prox == sABRECOL) {
             parse_vetr();
+            gera_instr_mepa(NULL, "CRVI", NULL, NULL);
+            return TIPO_INT;
         } else if (prox == sABREPAR) {
+            char nome[32];
+            strncpy(nome, current_tok.lexeme, sizeof(nome) - 1);
+            nome[sizeof(nome) - 1] = '\0';
+            Simbolo *s = symtab_lookup(nome);
             parse_call();
+            return s ? s->tipo : TIPO_INDEF;
         } else {
-            parse_use_id();
+            Simbolo *s = parse_use_id();
+            if (s) {
+                gera_instr_mepa(NULL, "CRVL", int_to_str(s->level), int_to_str(s->offset));
+                return s->tipo;
+            }
+            return TIPO_INDEF;
         }
-        return;
     }
 
-    diag_error_syntax(current_tok.line, "elemento valido (literal, identificador, vetor ou chamada)", tokenCatNome(current_tok.cat));
+    diag_error_syntax(current_tok.line, "elemento valido", tokenCatNome(current_tok.cat));
+    return TIPO_INDEF;
 }
 
-/* A produção elem da especificação também admite expressões completas. */
-static void parse_elem(void) {
-    parse_expr();
+static SimboloTipo parse_elem(void) {
+    return parse_expr();
 }
 
-/* <fact> ::= <elem> | "sNEG" <fact> | "sSUBRAT" <fact> | "(" <expr> ")" */
-static void parse_factor(void) {
-    if (current_tok.cat == sNEG || current_tok.cat == sSUBRAT) {
+static SimboloTipo parse_factor(void) {
+    if (current_tok.cat == sNEG) {
         advance();
-        parse_factor();
+        SimboloTipo t = parse_factor();
+        if (t != TIPO_BOOL) diag_error(current_tok.line, "operador '~' requer tipo logic");
+        gera_instr_mepa(NULL, "NEGA", NULL, NULL);
+        return TIPO_BOOL;
+    } else if (current_tok.cat == sSUBRAT) {
+        advance();
+        SimboloTipo t = parse_factor();
+        if (t != TIPO_INT) diag_error(current_tok.line, "menos unario requer tipo int");
+        gera_instr_mepa(NULL, "INVE", NULL, NULL);
+        return TIPO_INT;
     } else if (current_tok.cat == sABREPAR) {
         check(sABREPAR);
-        parse_expr();
+        SimboloTipo t = parse_expr();
         check(sFECHAPAR);
+        return t;
     } else {
-        parse_atom();
+        return parse_atom();
     }
 }
 
-/* <earip> ::= <fact> {<oparp> <fact>} */
-static void parse_earip(void) {
-    parse_factor();
+static SimboloTipo parse_earip(void) {
+    SimboloTipo t1 = parse_factor();
     while (current_tok.cat == sMULT || current_tok.cat == sDIV) {
+        TokenCategoria op = current_tok.cat;
         advance();
-        parse_factor();
+        SimboloTipo t2 = parse_factor();
+        if (t1 != TIPO_INT || t2 != TIPO_INT) {
+            diag_error(current_tok.line, "operacao multiplicativa requer int");
+        }
+        if (op == sMULT) {
+            gera_instr_mepa(NULL, "MULT", NULL, NULL);
+        } else {
+            gera_instr_mepa(NULL, "DIVI", NULL, NULL);
+        }
+        t1 = TIPO_INT;
     }
+    return t1;
 }
 
-/* <earit> ::= <earip> {<opari> <earip>} */
-static void parse_earit(void) {
-    parse_earip();
+static SimboloTipo parse_earit(void) {
+    SimboloTipo t1 = parse_earip();
     while (current_tok.cat == sSOMA || current_tok.cat == sSUBRAT) {
+        TokenCategoria op = current_tok.cat;
         advance();
-        parse_earip();
+        SimboloTipo t2 = parse_earip();
+        if (t1 != TIPO_INT || t2 != TIPO_INT) {
+            diag_error(current_tok.line, "operacao aditiva requer int");
+        }
+        if (op == sSOMA) {
+            gera_instr_mepa(NULL, "SOMA", NULL, NULL);
+        } else {
+            gera_instr_mepa(NULL, "SUBT", NULL, NULL);
+        }
+        t1 = TIPO_INT;
     }
+    return t1;
 }
 
-/* <erlac> ::= <earit> {<oprel> <earit>} */
-static void parse_erlac(void) {
-    parse_earit();
+static SimboloTipo parse_erlac(void) {
+    SimboloTipo t1 = parse_earit();
     while (current_tok.cat == sMAIOR || current_tok.cat == sMAIORIGUAL ||
            current_tok.cat == sIGUAL || current_tok.cat == sMENOR ||
            current_tok.cat == sMENORIGUAL || current_tok.cat == sDIFERENTE) {
+        TokenCategoria op = current_tok.cat;
         advance();
-        parse_earit();
+        SimboloTipo t2 = parse_earit();
+        if (t1 != t2) {
+            diag_error(current_tok.line, "comparacao requer tipos compativeis");
+        }
+        switch (op) {
+            case sMAIOR:      gera_instr_mepa(NULL, "CMMA", NULL, NULL); break;
+            case sMAIORIGUAL: gera_instr_mepa(NULL, "CMAG", NULL, NULL); break;
+            case sMENOR:      gera_instr_mepa(NULL, "CMME", NULL, NULL); break;
+            case sMENORIGUAL: gera_instr_mepa(NULL, "CMEG", NULL, NULL); break;
+            case sIGUAL:      gera_instr_mepa(NULL, "CMIG", NULL, NULL); break;
+            case sDIFERENTE:  gera_instr_mepa(NULL, "CMDG", NULL, NULL); break;
+            default: break;
+        }
+        t1 = TIPO_BOOL;
     }
+    return t1;
 }
 
-/* <elogc> ::= <erlac> {"sAND" <erlac>} */
-static void parse_elogc(void) {
-    parse_erlac();
+static SimboloTipo parse_elogc(void) {
+    SimboloTipo t1 = parse_erlac();
     while (current_tok.cat == sAND) {
         check(sAND);
-        parse_erlac();
+        SimboloTipo t2 = parse_erlac();
+        if (t1 != TIPO_BOOL || t2 != TIPO_BOOL) {
+            diag_error(current_tok.line, "operador '&' requer logic");
+        }
+        gera_instr_mepa(NULL, "CONJ", NULL, NULL);
+        t1 = TIPO_BOOL;
     }
+    return t1;
 }
 
-/* <expr> ::= <elogc> {"sOR" <elogc>} */
-static void parse_expr(void) {
-    parse_elogc();
+static SimboloTipo parse_expr(void) {
+    SimboloTipo t1 = parse_elogc();
     while (current_tok.cat == sOR) {
         check(sOR);
-        parse_elogc();
+        SimboloTipo t2 = parse_elogc();
+        if (t1 != TIPO_BOOL || t2 != TIPO_BOOL) {
+            diag_error(current_tok.line, "operador '|' requer logic");
+        }
+        gera_instr_mepa(NULL, "DISJ", NULL, NULL);
+        t1 = TIPO_BOOL;
     }
+    return t1;
 }
 
-/* <prg> ::= [<gvars>] {<subs>} <princ>
-   (ver nota no cabeçalho sobre <princ> não ser tratado separadamente aqui)
-
-   O escopo "global" é aberto/fechado aqui porque é o parser quem
-   controla escopos, e esta é a única produção que enxerga o programa
-   inteiro. symtab_init()/symtab_destroy() continuam sendo chamados pelo
-   main, fora do parser. */
 void parse_program(void) {
     advance();
     saw_main = 0;
+    offset_global = 0;
+
+    gera_instr_mepa(NULL, "INPP", NULL, NULL);
 
     symtab_enter_scope("global");
 
     if (current_tok.cat == sGLOBVARS) {
         parse_gvars();
     }
+
+    gera_instr_mepa(NULL, "DSVS", "R_MAIN", NULL);
 
     while (current_tok.cat == sFUNC || current_tok.cat == sPROC) {
         parse_subs();
@@ -814,7 +1003,13 @@ void parse_program(void) {
         diag_error(current_tok.line, "programa deve conter o procedimento proc main()");
     }
 
-    symtab_leave_scope();
+    if (offset_global > 0) {
+        gera_instr_mepa(NULL, "DMEM", int_to_str(offset_global), NULL);
+    }
+    gera_instr_mepa(NULL, "PARA", NULL, NULL);
+    gera_instr_mepa(NULL, "FIM", NULL, NULL);
 
-    check(TOKEN_EOF); /* Garante término do arquivo */
+    symtab_leave_scope();
+    
+    check(TOKEN_EOF);
 }
