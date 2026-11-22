@@ -350,7 +350,7 @@ static void parse_proc(void) {
     if (eh_main) {
         if (saw_main) diag_error(current_tok.line, "procedimento main duplicado");
         saw_main = 1;
-        strncpy(rotulo_sub, "R_MAIN", sizeof(rotulo_sub));
+        strncpy(rotulo_sub, "L0", sizeof(rotulo_sub));
     } else {
         if (saw_main) {
             diag_error(current_tok.line, "main deve ser a ultima sub-rotina do programa");
@@ -386,11 +386,7 @@ static void parse_proc(void) {
         }
     }
 
-    if (!eh_main) {
-        gera_instr_mepa(rotulo_sub, "ENPR", int_to_str(1), NULL);
-    } else {
-        gera_instr_mepa(rotulo_sub, "NADA", NULL, NULL);
-    }
+    gera_instr_mepa(rotulo_sub, "ENPR", int_to_str(1), NULL);
 
     if (current_tok.cat == sLOCVARS) {
         parse_lvars();
@@ -993,7 +989,7 @@ void parse_program(void) {
         parse_gvars();
     }
 
-    gera_instr_mepa(NULL, "DSVS", "R_MAIN", NULL);
+    gera_instr_mepa(NULL, "DSVS", "L0", NULL);
 
     while (current_tok.cat == sFUNC || current_tok.cat == sPROC) {
         parse_subs();
