@@ -1,13 +1,13 @@
         INPP  
         AMEM   1
-        DSVS   R_MAIN
-L1    : ENPR   1
+        DSVS   L0
+L1:     ENPR   1
         CRVL   1,-4
         CRVL   1,-3
         SOMA  
         ARMZ   1,-5
         RTPR   1,2
-R_MAIN: NADA  
+L0:     ENPR   1
         AMEM   2
         CRCT   10
         ARMZ   1,0
@@ -25,3 +25,4 @@ R_MAIN: NADA
         DMEM   2
         DMEM   1
         PARA  
+        FIM   

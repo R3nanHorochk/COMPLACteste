@@ -304,7 +304,7 @@ static void parse_func(void) {
     /* Insere parâmetros com deslocamentos MEPA corretos:
        Primeiro parâmetro em -(nparams + 2), último em -3 */
     for (int i = 0; i < nparams; i++) {
-        int desloc = -(nparams + 2 - i);
+    int desloc = -(nparams + 4 - i);
         if (!symtab_insert(p_nomes[i], CAT_PARAM, p_tipos[i], desloc, p_extras[i])) {
             diag_error_syntax(current_tok.line, "identificador de parametro duplicado", p_nomes[i]);
         }
@@ -380,7 +380,7 @@ static void parse_proc(void) {
     check(sFECHAPAR);
 
     for (int i = 0; i < nparams; i++) {
-        int desloc = -(nparams + 2 - i);
+        int desloc = -(nparams + 4 - i);
         if (!symtab_insert(p_nomes[i], CAT_PARAM, p_tipos[i], desloc, p_extras[i])) {
             diag_error_syntax(current_tok.line, "identificador de parametro duplicado", p_nomes[i]);
         }
@@ -529,7 +529,7 @@ static void parse_ret(void) {
     SimboloTipo t = parse_elem();
     (void)t;
     if (dentro_de_funcao) {
-        int endereco_ret = -(func_atual_nparams + 3);
+        int endereco_ret = -(func_atual_nparams + 5);
         gera_instr_mepa(NULL, "ARMZ", "1", int_to_str(endereco_ret));
     }
 }
